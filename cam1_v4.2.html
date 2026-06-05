@@ -1,0 +1,206 @@
+﻿<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>كاميرا الكيانات v4.2</title>
+<style>
+body{background:#000;margin:0;overflow:hidden;color:#0f0;font-family:tahoma}
+video,canvas{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover}
+#ui{position:absolute;top:10px;right:10px;z-index:10;background:#000d;padding:12px;border:2px solid #0f0;border-radius:8px;width:190px}
+button{background:#0f0;color:#000;border:none;padding:8px;margin:4px 0;width:100%;cursor:pointer;font-weight:bold;border-radius:5px}
+button.purple{background:purple;color:#fff}
+button.red{background:red;color:#fff}
+label{color:#ff0;font-size:13px}
+input{width:100%}
+#status{color:#0ff;text-align:center;font-size:12px;margin-top:5px}
+</style>
+</head>
+<body>
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="out"></canvas>
+
+<div id="ui">
+<h3 style="margin:0 0 8px;text-align:center">كاميرا الكيانات</h3>
+<button id="start">شغل الكاميرا</button>
+<button id="record">تسجيل فيديو</button>
+<button id="mode4" class="purple">وضع الكيان - Entity</button>
+<button id="alarmBtn" class="red">الإنذار: شغال</button>
+
+<label>الحساسية: <span id="sval">25</span></label>
+<input type="range" id="sens" min="10" max="80" value="25">
+
+<div id="status">اضغط شغل الكاميرا</div>
+</div>
+
+<script>
+const video = document.getElementById('cam');
+const canvas = document.getElementById('out');
+const ctx = canvas.getContext('2d');
+const status = document.getElementById('status');
+
+let sens = 25;
+let lastFrame = null;
+let recorder, chunks = [];
+let audioCtx, alarmOn = true;
+let mode = 4;
+
+// تشغيل الكاميرا
+document.getElementById('start').onclick = async () => {
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+      canvas.width = video.videoWidth;
+      canvas.height = video.height = video.videoHeight;
+      status.innerText = 'الكاميرا شغالة ✓';
+      process();
+    };
+  }catch(e){
+    status.innerText = 'خطأ: ' + e.name;
+    console.error(e);
+  }
+};
+
+// تسجيل
+document.getElementById('record').onclick = () => {
+  if(!recorder || recorder.state === 'inactive'){
+    chunks = [];
+    recorder = new MediaRecorder(canvas.captureStream(24));
+    recorder.ondataavailable = e => chunks.push(e.data);
+    recorder.onstop = () => {
+      let blob = new Blob(chunks, {type: 'video/webm'});
+      let url = URL.createObjectURL(blob);
+      let a = document.createElement('a');
+      a.href = url;
+      a.download = 'entity_' + Date.now() + '.webm';
+      a.click();
+    };
+    recorder.start();
+    document.getElementById('record').innerText = 'إيقاف التسجيل';
+  }else{
+    recorder.stop();
+    document.getElementById('record').innerText = 'تسجيل فيديو';
+  }
+};
+
+// إنذار
+document.getElementById('alarmBtn').onclick = e => {
+  alarmOn =!alarmOn;
+  e.target.innerText = alarmOn? 'الإنذار: شغال' : 'الإنذار: مطفي';
+  e.target.style.background = alarmOn? 'red' : '#555';
+};
+
+// المعالجة الرئيسية
+function process(){
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  if(mode === 4){
+    let currentFrame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // 1. نعمل ضجيج للخلفية كلها
+    let output = new ImageData(canvas.width, canvas.height);
+    for(let i=0; i<currentFrame.data.length; i+=4){
+      let noise = (Math.random()-0.5) * 120;
+      output.data[i] = noise + 60; // R
+      output.data[i+1] = noise + 40; // G
+      output.data[i+2] = noise + 100; // B بنفسجي
+      output.data[i+3] = 255;
+    }
+
+    // 2. نفحص البقع السادة زي القميص
+    let entities = [];
+    if(lastFrame){
+      for(let y=4; y<canvas.height-4; y+=4){
+        for(let x=4; x<canvas.width-4; x+=4){
+          let i = (y * canvas.width + x) * 4;
+
+          // فرق الإضاءة بين الفريم الحالي والسابق
+          let diff = Math.abs(currentFrame.data[i] - lastFrame.data[i]) +
+                     Math.abs(currentFrame.data[i+1] - lastFrame.data[i+1]) +
+                     Math.abs(currentFrame.data[i+2] - lastFrame.data[i+2]);
+
+          // لو في تغير + المنطقة موحدة = كيان
+          if(diff > sens){
+            let uniformity = getUniformity(currentFrame, x, y);
+            if(uniformity > 0.6){
+              // نلون البقعة أبيض ناصع
+              for(let dy=-3; dy<=3; dy++){
+                for(let dx=-3; dx<=3; dx++){
+                  let ni = ((y+dy)*canvas.width + (x+dx)) * 4;
+                  output.data[ni] = 255;
+                  output.data[ni+1] = 255;
+                  output.data[ni+2] = 200;
+                }
+              }
+              entities.push({x,y});
+            }
+          }
+        }
+      }
+    }
+
+    ctx.putImageData(output, 0, 0);
+
+    // 3. نرسم مربع حوالين الكيان
+    if(entities.length > 15){
+      let minX = Math.min(...entities.map(e=>e.x));
+      let maxX = Math.max(...entities.map(e=>e.x));
+      let minY = Math.min(...entities.map(e=>e.y));
+      let maxY = Math.max(...entities.map(e=>e.y));
+
+      ctx.strokeStyle = '#00ff00';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(minX-10, minY-10, maxX-minX+20, maxY-minY+20);
+
+      ctx.fillStyle = '#00ff00';
+      ctx.font = 'bold 18px tahoma';
+      ctx.fillText('كيان مكتشف', minX, minY-15);
+
+      if(alarmOn) playBeep();
+      status.innerText = 'كيان مكتشف! عدد النقاط: ' + entities.length;
+    }else{
+      status.innerText = 'بفتش... حرك قميصك قدام الكاميرا';
+    }
+
+    lastFrame = currentFrame;
+  }
+
+  requestAnimationFrame(process);
+}
+
+// فحص التجانس - زي القميص السادة
+function getUniformity(imgData, cx, cy){
+  let samples = [];
+  let w = canvas.width;
+  for(let dy=-2; dy<=2; dy++){
+    for(let dx=-2; dx<=2; dx++){
+      let i = ((cy+dy)*w + (cx+dx)) * 4;
+      let bright = (imgData.data[i] + imgData.data[i+1] + imgData.data[i+2]) / 3;
+      samples.push(bright);
+    }
+  }
+  let avg = samples.reduce((a,b)=>a+b)/samples.length;
+  let variance = samples.reduce((a,b)=>a+Math.abs(b-avg),0)/samples.length;
+  return 1 - (variance/255); // كل ما قرب من 1 معناها موحد زي القميص
+}
+
+// صوت بيب
+function playBeep(){
+  if(!audioCtx) audioCtx = new AudioContext();
+  let osc = audioCtx.createOscillator();
+  let gain = audioCtx.createGain();
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.frequency.value = 700;
+  gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+  osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+}
+
+// الحساسية
+document.getElementById('sens').oninput = e => {
+  sens = e.target.value;
+  document.getElementById('sval').innerText = sens;
+};
+</script>
+</body>
+</html>
