@@ -1,0 +1,257 @@
+﻿<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>كاميرا الكيانات v4.6 ثابتة</title>
+<style>
+body{background:#000;margin:0;overflow:hidden;color:#0f0;font-family:tahoma}
+video,canvas{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover}
+#ui{position:absolute;top:10px;right:10px;z-index:10;background:#000d;padding:12px;border:2px solid #0f0;border-radius:8px;width:210px}
+button{background:#0f0;color:#000;border:none;padding:8px;margin:4px 0;width:100%;cursor:pointer;font-weight:bold;border-radius:5px}
+button.purple{background:purple;color:#fff}
+button.red{background:red;color:#fff}
+button.blue{background:blue;color:#fff}
+label{color:#ff0;font-size:13px}
+input{width:100%}
+#status{color:#0ff;text-align:center;font-size:12px;margin-top:5px}
+#debug{position:absolute;bottom:10px;left:10px;background:#000a;color:#ff0;padding:8px;border:1px solid #ff0;font-size:11px;z-index:20;display:none}
+</style>
+</head>
+<body>
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="out"></canvas>
+
+<div id="ui">
+<h3 style="margin:0 0 8px;text-align:center">v4.6 ثابتة</h3>
+<button id="start">شغل الكاميرا</button>
+<button id="record">تسجيل</button>
+<button id="mode4" class="purple">وضع الكيان</button>
+<button id="debugBtn" class="blue">Debug: مطفي</button>
+<button id="alarmBtn" class="red">الإنذار: شغال</button>
+
+<label>الحساسية: <span id="sval">28</span></label>
+<input type="range" id="sens" min="10" max="80" value="28">
+
+<div id="status">اضغط شغل الكاميرا</div>
+</div>
+
+<div id="debug"></div>
+
+<script>
+const video = document.getElementById('cam');
+const canvas = document.getElementById('out');
+const ctx = canvas.getContext('2d');
+const status = document.getElementById('status');
+const debugDiv = document.getElementById('debug');
+
+let sens = 28;
+let lastFrame = null;
+let recorder, chunks = [];
+let audioCtx, alarmOn = true;
+let debugMode = false;
+
+document.getElementById('start').onclick = async () => {
+  status.innerText = 'بشغل الكاميرا...';
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {width: 640, height: 480, facingMode: "user"}
+    });
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+      canvas.width = 640;
+      canvas.height = 480;
+      status.innerText = 'الكاميرا شغالة ✓';
+      console.log('الكاميرا اشتغلت');
+      process();
+    };
+    video.onerror = (e) => {
+      status.innerText = 'خطأ في الفيديو';
+      console.error(e);
+    };
+  }catch(e){
+    status.innerText = 'فشل: ' + e.name;
+    alert('ما قدرت أشغل الكاميرا: ' + e.message + '\n\nتأكد انك فاتح من https أو localhost + اديت إذن الكاميرا');
+    console.error('خطأ الكاميرا:', e);
+  }
+};
+
+document.getElementById('debugBtn').onclick = e => {
+  debugMode =!debugMode;
+  e.target.innerText = debugMode? 'Debug: شغال' : 'Debug: مطفي';
+  debugDiv.style.display = debugMode? 'block' : 'none';
+};
+
+function detectEntity(){
+  if(!lastFrame) return;
+
+  let currentFrame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  let output = new ImageData(canvas.width, canvas.height);
+  let candidates = [];
+  let debugInfo = [];
+
+  // ضجيج بنفسجي
+  for(let i=0; i<currentFrame.data.length; i+=4){
+    let noise = (Math.random()-0.5) * 100;
+    output.data[i] = noise + 50;
+    output.data[i+1] = noise + 30;
+    output.data[i+2] = noise + 90;
+    output.data[i+3] = 255;
+  }
+
+  for(let y=8; y<canvas.height-8; y+=8){
+    for(let x=8; x<canvas.width-8; x+=8){
+      let i = (y * canvas.width + x) * 4;
+      let diff = Math.abs(currentFrame.data[i] - lastFrame.data[i]) +
+                 Math.abs(currentFrame.data[i+1] - lastFrame.data[i+1]) +
+                 Math.abs(currentFrame.data[i+2] - lastFrame.data[i+2]);
+
+      if(diff > sens){
+        let uniformity = getUniformity(currentFrame, x, y);
+        let brightness = (currentFrame.data[i] + currentFrame.data[i+1] + currentFrame.data[i+2]) / 3;
+
+        if(uniformity > 0.75){
+          let grouped = false;
+          for(let c of candidates){
+            if(Math.abs(c.x - x) < 50 && Math.abs(c.y - y) < 50){
+              c.points.push({x,y,uniformity,brightness});
+              grouped = true;
+              break;
+            }
+          }
+          if(!grouped) candidates.push({x, y, points:[{x,y,uniformity,brightness}]});
+        }
+      }
+    }
+  }
+
+  // مضاد الفلود: المربع ما يتعدى 50% من الشاشة
+  let maxPixels = canvas.width * canvas.height * 0.5;
+  let realEntities = candidates.filter(c => {
+    let area = c.points.length * 64;
+    return area > 2000 && area < maxPixels;
+  });
+
+  realEntities.forEach((e, idx) => {
+    let minX = Math.min(...e.points.map(p=>p.x));
+    let maxX = Math.max(...e.points.map(p=>p.x));
+    let minY = Math.min(...e.points.map(p=>p.y));
+    let maxY = Math.max(...e.points.map(p=>p.y));
+    let avgUniformity = e.points.reduce((a,p)=>a+p.uniformity,0)/e.points.length;
+    let avgBrightness = e.points.reduce((a,p)=>a+p.brightness,0)/e.points.length;
+
+    // تبييض الكيان
+    for(let p of e.points){
+      for(let dy=-3; dy<=3; dy++){
+        for(let dx=-3; dx<=3; dx++){
+          let ni = ((p.y+dy)*canvas.width + (p.x+dx)) * 4;
+          if(ni >= 0 && ni < output.data.length){
+            output.data[ni] = 255;
+            output.data[ni+1] = 255;
+            output.data[ni+2] = 220;
+          }
+        }
+      }
+    }
+
+    ctx.strokeStyle = '#ff0000';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(minX-15, minY-15, maxX-minX+30, maxY-minY+30);
+    ctx.fillStyle = '#ff0000';
+    ctx.font = 'bold 20px tahoma';
+    ctx.fillText('كيان', minX, minY-20);
+
+    if(alarmOn) playBeep();
+    status.innerText = كيان مكتشف! ${Math.round(maxX-minX)}x${Math.round(maxY-minY)};
+
+    if(debugMode){
+      debugInfo.push(كيان ${idx+1});
+      debugInfo.push(نقاط: ${e.points.length});
+      debugInfo.push(تجانس: ${avgUniformity.toFixed(3)});
+      debugInfo.push(سطوع: ${Math.round(avgBrightness)});
+      debugInfo.push('---');
+    }
+  });
+
+  if(realEntities.length === 0) status.innerText = 'ما في كيان';
+
+  if(debugMode) debugDiv.innerHTML = debugInfo.join('<br>');
+
+  ctx.putImageData(output, 0, 0);
+  lastFrame = currentFrame;
+}
+
+function getUniformity(imgData, cx, cy){
+  let samples = [];
+  let w = canvas.width;
+  for(let dy=-2; dy<=2; dy++){
+    for(let dx=-2; dx<=2; dx++){
+      let i = ((cy+dy)*w + (cx+dx)) * 4;
+      if(i < 0 || i >= imgData.data.length) continue;
+      let bright = (imgData.data[i] + imgData.data[i+1] + imgData.data[i+2]) / 3;
+      samples.push(bright);
+    }
+  }
+  if(samples.length === 0) return 0;
+  let sum = 0;
+  for(let s of samples) sum += s;
+  let avg = sum / samples.length;
+  let variance = 0;
+  for(let s of samples) variance += Math.abs(s - avg);
+  variance = variance / samples.length;
+  return 1 - (variance/255);
+}
+
+function process(){
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  detectEntity();
+  requestAnimationFrame(process);
+}
+
+function playBeep(){
+  if(!audioCtx) audioCtx = new AudioContext();
+  let osc = audioCtx.createOscillator();
+  let gain = audioCtx.createGain();
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.frequency.value = 400;
+  gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+  osc.start(); osc.stop(audioCtx.currentTime + 0.15);
+}
+
+document.getElementById('sens').oninput = e => {
+  sens = e.target.value;
+  document.getElementById('sval').innerText = sens;
+};
+
+document.getElementById('record').onclick = () => {
+  if(!recorder || recorder.state === 'inactive'){
+    chunks = [];
+    try{
+      recorder = new MediaRecorder(canvas.captureStream(24));
+      recorder.ondataavailable = e => chunks.push(e.data);
+      recorder.onstop = () => {
+        let blob = new Blob(chunks, {type: 'video/webm'});
+        let a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'entity_' + Date.now() + '.webm';
+        a.click();
+      };
+      recorder.start();
+      document.getElementById('record').innerText = 'إيقاف';
+    }catch(e){
+      alert('التسجيل ما مدعوم في المتصفح ده');
+    }
+  }else{
+    recorder.stop();
+    document.getElementById('record').innerText = 'تسجيل';
+  }
+};
+
+document.getElementById('alarmBtn').onclick = e => {
+  alarmOn =!alarmOn;
+  e.target.innerText = alarmOn? 'الإنذار: شغال' : 'الإنذار: مطفي';
+  e.target.style.background = alarmOn? 'red' : '#555';
+};
+</script>
+</body>
+</html>
