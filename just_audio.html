@@ -1,0 +1,194 @@
+﻿<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>v1.0 Audio Hunter</title>
+<style>
+body{background:#000;color:#0f0;font-family:tahoma;margin:0;padding:20px;text-align:center}
+#ui{background:#111;border:2px solid #0f0;padding:20px;border-radius:10px;max-width:500px;margin:auto}
+button{background:#0f0;color:#000;border:none;padding:12px 20px;margin:8px;font-weight:bold;border-radius:5px;cursor:pointer;font-size:16px}
+canvas{border:2px solid #0f0;margin-top:15px;background:#000;width:100%;height:200px}
+#status{color:#ff0;font-size:18px;margin:15px 0}
+#log{background:#000;border:1px solid #0f0;height:150px;overflow-y:auto;padding:8px;text-align:right;font-size:13px;color:#0ff}
+label{color:#fff}
+input{width:80%}
+</style>
+</head>
+<body>
+
+<div id="ui">
+<h2>👻 v1.0 Audio Hunter</h2>
+<button id="start">شغل المايك الخارق</button>
+<button id="record">تسجيل يدوي</button>
+
+<label>التكبير: <span id="gval">5x</span></label>
+<input type="range" id="gain" min="1" max="20" value="5">
+
+<label>حساسية الصدى: <span id="eval">30</span></label>
+<input type="range" id="echo" min="10" max="100" value="30">
+
+<div id="status">واقف</div>
+<canvas id="wave"></canvas>
+
+<h3 style="color:#0f0">سجل الأحداث:</h3>
+<div id="log"></div>
+</div>
+
+<script>
+const log = document.getElementById('log');
+const status = document.getElementById('status');
+const canvas = document.getElementById('wave');
+const ctx = canvas.getContext('2d');
+canvas.width = 500;
+canvas.height = 200;
+
+let audioCtx, analyser, micStream, recorder, chunks = [];
+let gainNode, filterNode;
+let gainValue = 5;
+let echoSens = 30;
+let lastBuffer = null;
+
+function addLog(msg){
+  let time = new Date().toLocaleTimeString();
+  log.innerHTML = '[' + time + '] ' + msg + '<br>' + log.innerHTML;
+}
+
+document.getElementById('start').onclick = async function(){
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    audioCtx = new AudioContext();
+
+    filterNode = audioCtx.createBiquadFilter();
+    filterNode.type = 'bandpass';
+    filterNode.frequency.value = 1500;
+    filterNode.Q.value = 1;
+
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = gainValue;
+
+    let source = audioCtx.createMediaStreamSource(micStream);
+    source.connect(filterNode);
+    filterNode.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    gainNode.connect(analyser);
+
+    status.innerText = 'المايك شغال ✓ اسمع كويس';
+    addLog('المايك الخارق اشتغل');
+    drawWave();
+    detectSound();
+
+  }catch(e){
+    status.innerText = 'خطأ: ' + e.message;
+    alert(e.message);
+  }
+};
+
+function drawWave(){
+  let bufferLength = analyser.frequencyBinCount;
+  let dataArray = new Uint8Array(bufferLength);
+
+  function draw(){
+    requestAnimationFrame(draw);
+    analyser.getByteTimeDomainData(dataArray);
+
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#0f0';
+    ctx.beginPath();
+
+    let sliceWidth = canvas.width / bufferLength;
+    let x = 0;
+
+    for(let i=0; i<bufferLength; i++){
+      let v = dataArray[i] / 128.0;
+      let y = v * canvas.height/2;
+
+      if(i === 0){
+        ctx.moveTo(x, y);
+      }else{
+        ctx.lineTo(x, y);
+      }
+      x += sliceWidth;
+    }
+
+    ctx.stroke();
+  }
+  draw();
+}
+
+function detectSound(){
+  let dataArray = new Uint8Array(analyser.fftSize);
+
+  function check(){
+    analyser.getByteTimeDomainData(dataArray);
+
+    let sum = 0;
+    for(let i=0; i<dataArray.length; i++){
+      sum += Math.abs(dataArray[i] - 128);
+    }
+    let volume = sum / dataArray.length;
+
+    if(volume > echoSens){
+      status.innerText = 'صوت مكتشف! مستوى: ' + Math.floor(volume);
+
+      if(lastBuffer){
+        let diff = 0;
+        for(let i=0; i<dataArray.length; i++){
+          diff += Math.abs(dataArray[i] - lastBuffer[i]);
+        }
+        diff = diff / dataArray.length;
+
+        if(diff < 20 && diff > 5){
+          status.innerText = 'صدى مكتشف! ⚠️';
+          addLog('صدى غريب! مستوى: ' + Math.floor(volume));
+        }
+      }
+      lastBuffer = dataArray.slice(0);
+    }else{
+      status.innerText = 'بستمع...';
+    }
+
+    setTimeout(check, 200);
+  }
+  check();
+}
+
+document.getElementById('record').onclick = function(){
+  if(recorder == null || recorder.state == 'inactive'){
+    chunks = [];
+    recorder = new MediaRecorder(micStream);
+    recorder.ondataavailable = function(e){ chunks.push(e.data); };
+    recorder.onstop = function(){
+      let blob = new Blob(chunks, {type: 'audio/webm'});
+      let a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'audio_' + Date.now() + '.webm';
+      a.click();
+      addLog('تم حفظ التسجيل يدوياً');
+    };
+    recorder.start();
+    document.getElementById('record').innerText = 'إيقاف التسجيل';
+    addLog('تسجيل بدأ');
+  }else{
+    recorder.stop();
+    document.getElementById('record').innerText = 'تسجيل يدوي';
+  }
+};
+
+document.getElementById('gain').oninput = function(e){
+  gainValue = e.target.value;
+  document.getElementById('gval').innerText = gainValue + 'x';
+  if(gainNode) gainNode.gain.value = gainValue;
+};
+
+document.getElementById('echo').oninput = function(e){
+  echoSens = e.target.value;
+  document.getElementById('eval').innerText = echoSens;
+};
+</script>
+</body>
+</html>
